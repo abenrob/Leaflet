@@ -178,6 +178,7 @@ describe("Map", function () {
 	describe("#getBoundsZoom", function () {
 		var halfLength = 0.00025;
 		var bounds = [[-halfLength, -halfLength], [halfLength, halfLength]];
+		var wideBounds = [[-halfLength, -halfLength * 10], [halfLength, halfLength * 10]];
 		var padding = [100, 100];
 		var height = '400px';
 
@@ -188,17 +189,45 @@ describe("Map", function () {
 			expect(map.getBoundsZoom(bounds, false, padding)).to.be.equal(19);
 		});
 
-		it("returns multiples of zoomSnap when zoomSnap > 0 on any3d browsers", function () {
+		it.skipInPhantom("returns multiples of zoomSnap when zoomSnap > 0 on any3d browsers", function () {
 			var container = map.getContainer();
 			container.style.height = height;
 			document.body.appendChild(container);
-			L.Browser.any3d = true;
+			// L.Browser.any3d = true;	// L.Browser is frozen since ES6ication
 			map.options.zoomSnap = 0.5;
 			expect(map.getBoundsZoom(bounds, false, padding)).to.be.equal(19.5);
 			map.options.zoomSnap = 0.2;
 			expect(map.getBoundsZoom(bounds, false, padding)).to.be.equal(19.6);
 			map.options.zoomSnap = 0;
 			expect(map.getBoundsZoom(bounds, false, padding)).to.be.within(19.6864560, 19.6864561);
+		});
+
+		it("getBoundsZoom does not return Infinity when projected SE - NW has negative components", function () {
+			var container = map.getContainer();
+			container.style.height = 369;
+			container.style.width = 1048;
+			document.body.appendChild(container);
+			var bounds = L.latLngBounds(L.latLng([62.18475569507688, 6.926335173954951]), L.latLng([62.140483526511694, 6.923933370740089]));
+
+			// The following coordinates are bounds projected with proj4leaflet crs = EPSG:25833', '+proj=utm +zone=33 +ellps=GRS80 +units=m +no_defs
+			var projectedSE = L.point(7800503.059925064, 6440062.353052008);
+			var projectedNW = L.point(7801987.203481699, 6425186.447901004);
+			var crsMock = sinon.mock(map.options.crs);
+			crsMock.expects("project").withArgs(bounds.getNorthWest()).returns(projectedNW);
+			crsMock.expects("project").withArgs(bounds.getSouthEast()).returns(projectedSE);
+
+			var padding = L.point(-50, -50);
+			map.setZoom(16);
+			expect(map.getBoundsZoom(bounds, false, padding)).to.eql(9);
+		});
+
+		it("respects the 'inside' parameter", function () {
+			var container = map.getContainer();
+			container.style.height = height;
+			container.style.width = '1024px'; // Make sure the width is defined for browsers other than PhantomJS (in particular Firefox).
+			document.body.appendChild(container);
+			expect(map.getBoundsZoom(wideBounds, false, padding)).to.be.equal(17);
+			expect(map.getBoundsZoom(wideBounds, true, padding)).to.be.equal(20);
 		});
 	});
 
@@ -281,6 +310,34 @@ describe("Map", function () {
 			expect(map.getMinZoom()).to.be(2);
 			expect(map.getMaxZoom()).to.be(20);
 		});
+
+		it("layer minZoom overrides map zoom if map has no minZoom set and layer minZoom is bigger than map zoom", function () {
+			var map = L.map(document.createElement("div"), {zoom: 10});
+			L.tileLayer("{z}{x}{y}", {minZoom: 15}).addTo(map);
+
+			expect(map.getMinZoom()).to.be(15);
+		});
+
+		it("layer maxZoom overrides map zoom if map has no maxZoom set and layer maxZoom is smaller than map zoom", function () {
+			var map = L.map(document.createElement("div"), {zoom: 20});
+			L.tileLayer("{z}{x}{y}", {maxZoom: 15}).addTo(map);
+
+			expect(map.getMaxZoom()).to.be(15);
+		});
+
+		it("map's zoom is adjusted to layer's minZoom even if initialized with smaller value", function () {
+			var map = L.map(document.createElement("div"), {zoom: 10});
+			L.tileLayer("{z}{x}{y}", {minZoom: 15}).addTo(map);
+
+			expect(map.getZoom()).to.be(15);
+		});
+
+		it("map's zoom is adjusted to layer's maxZoom even if initialized with larger value", function () {
+			var map = L.map(document.createElement("div"), {zoom: 20});
+			L.tileLayer("{z}{x}{y}", {maxZoom: 15}).addTo(map);
+
+			expect(map.getZoom()).to.be(15);
+		});
 	});
 
 	describe("#hasLayer", function () {
@@ -361,6 +418,13 @@ describe("Map", function () {
 			});
 			map.setView([0, 0], 0);
 			map.addLayer(layer);
+		});
+
+		it("throws if adding something which is not a layer", function () {
+			var control = L.control.layers();
+			expect(function () {
+				map.addLayer(control);
+			}).to.throwError();
 		});
 
 		describe("When the first layer is added to a map", function () {
@@ -646,6 +710,35 @@ describe("Map", function () {
 
 			expect(spy.called).to.be.ok();
 		});
+
+		it("correctly adjusts for new container size when view is set during map initialization (#6165)", function () {
+			// Use a newly initialized map
+			map.remove();
+
+			var center = [0, 0];
+
+			// The edge case is only if view is set directly during map initialization
+			map = L.map(container, {
+				center: center,
+				zoom: 0
+			});
+
+			// Change the container size
+			container.style.width = '600px';
+
+			// The map should not be aware yet of container size change,
+			// otherwise the next invalidateSize will not be able to
+			// compute the size difference
+			expect(map.getSize().x).to.equal(100);
+			expect(map.latLngToContainerPoint(center).x).to.equal(50);
+
+			// Now notifying the map that the container size has changed,
+			// it should return new values and correctly position coordinates
+			map.invalidateSize();
+
+			expect(map.getSize().x).to.equal(600);
+			expect(map.latLngToContainerPoint(center).x).to.equal(300);
+		});
 	});
 
 	describe('#flyTo', function () {
@@ -723,7 +816,7 @@ describe("Map", function () {
 			map.zoomOut(null, {animate: false});
 		});
 
-		it('zoomIn ignores the zoomDelta option on non-any3d browsers', function (done) {
+		it.skipInNonPhantom('zoomIn ignores the zoomDelta option on non-any3d browsers', function (done) {
 			L.Browser.any3d = false;
 			map.options.zoomSnap = 0.25;
 			map.options.zoomDelta = 0.25;
@@ -735,7 +828,7 @@ describe("Map", function () {
 			map.zoomIn(null, {animate: false});
 		});
 
-		it('zoomIn respects the zoomDelta option on any3d browsers', function (done) {
+		it.skipInPhantom('zoomIn respects the zoomDelta option on any3d browsers', function (done) {
 			L.Browser.any3d = true;
 			map.options.zoomSnap = 0.25;
 			map.options.zoomDelta = 0.25;
@@ -748,7 +841,7 @@ describe("Map", function () {
 			map.zoomIn(null, {animate: false});
 		});
 
-		it('zoomOut respects the zoomDelta option on any3d browsers', function (done) {
+		it.skipInPhantom('zoomOut respects the zoomDelta option on any3d browsers', function (done) {
 			L.Browser.any3d = true;
 			map.options.zoomSnap = 0.25;
 			map.options.zoomDelta = 0.25;
@@ -761,7 +854,7 @@ describe("Map", function () {
 			map.zoomOut(null, {animate: false});
 		});
 
-		it('zoomIn snaps to zoomSnap on any3d browsers', function (done) {
+		it.skipInPhantom('zoomIn snaps to zoomSnap on any3d browsers', function (done) {
 			map.options.zoomSnap = 0.25;
 			map.setView(center, 10);
 			map.once('zoomend', function () {
@@ -773,7 +866,7 @@ describe("Map", function () {
 			map.zoomIn(0.22, {animate: false});
 		});
 
-		it('zoomOut snaps to zoomSnap on any3d browsers', function (done) {
+		it.skipInPhantom('zoomOut snaps to zoomSnap on any3d browsers', function (done) {
 			map.options.zoomSnap = 0.25;
 			map.setView(center, 10);
 			map.once('zoomend', function () {
@@ -783,6 +876,17 @@ describe("Map", function () {
 			});
 			L.Browser.any3d = true;
 			map.zoomOut(0.22, {animate: false});
+		});
+	});
+
+	describe('#_getBoundsCenterZoom', function () {
+		var center = L.latLng(50.5, 30.51);
+
+		it('Returns valid center on empty bounds in unitialized map', function () {
+			// Edge case from #5153
+			var centerAndZoom = map._getBoundsCenterZoom([center, center]);
+			expect(centerAndZoom.center).to.eql(center);
+			expect(centerAndZoom.zoom).to.eql(Infinity);
 		});
 	});
 
@@ -812,7 +916,7 @@ describe("Map", function () {
 			map.fitBounds(bounds, {animate: false});
 		});
 
-		it('Snaps zoom to zoomSnap on any3d browsers', function (done) {
+		it.skipInPhantom('Snaps zoom to zoomSnap on any3d browsers', function (done) {
 			map.options.zoomSnap = 0.25;
 			L.Browser.any3d = true;
 			map.once('zoomend', function () {
@@ -823,7 +927,7 @@ describe("Map", function () {
 			map.fitBounds(bounds, {animate: false});
 		});
 
-		it('Ignores zoomSnap on non-any3d browsers', function (done) {
+		it.skipInNonPhantom('Ignores zoomSnap on non-any3d browsers', function (done) {
 			map.options.zoomSnap = 0.25;
 			L.Browser.any3d = false;
 			map.once('zoomend', function () {
@@ -930,6 +1034,98 @@ describe("Map", function () {
 		});
 
 	});
+
+
+	describe("#panInside", function () {
+		var center,
+		    tl,
+		    tlPix;
+
+		beforeEach(function () {
+			var container = map.getContainer();
+			container.style.height = container.style.width = "500px";
+			document.body.appendChild(container);
+			map.setView(L.latLng([53.0, 0.15]), 12, {animate: false});
+			center = map.getCenter();
+			tl = map.getBounds().getNorthWest();
+			tlPix = map.getPixelBounds().min;
+		});
+
+		afterEach(function () {
+			document.body.removeChild(map.getContainer());
+		});
+
+		it("does not pan the map when the target is within bounds", function () {
+			map.panInside(tl, {animate:false});
+			expect(center).to.equal(map.getCenter());
+		});
+
+		it("pans the map when padding is provided and the target is within the border area", function () {
+			var padding = [40, 20],
+			    p = tlPix.add([30, 0]),	// Top-left
+			    distanceMoved;
+			map.panInside(map.unproject(p), {padding: padding, animate: false});
+			distanceMoved = map.getPixelBounds().min.subtract(tlPix);
+			expect(distanceMoved.equals(L.point([-10, -20]))).to.eql(true);
+
+			tlPix = map.getPixelBounds().min;
+			p = [map.getPixelBounds().max.x - 10, map.getPixelBounds().min.y];	// Top-right
+			map.panInside(map.unproject(p), {padding: padding, animate: false});
+			distanceMoved = map.getPixelBounds().min.subtract(tlPix);
+			expect(distanceMoved.equals(L.point([30, -20]))).to.eql(true);
+
+			tlPix = map.getPixelBounds().min;
+			p = [map.getPixelBounds().min.x + 35, map.getPixelBounds().max.y];	// Bottom-left
+			map.panInside(map.unproject(p), {padding: padding, animate: false});
+			distanceMoved = map.getPixelBounds().min.subtract(tlPix);
+			expect(distanceMoved.equals(L.point([-5, 20]))).to.eql(true);
+
+			tlPix = map.getPixelBounds().min;
+			p = [map.getPixelBounds().max.x - 15, map.getPixelBounds().max.y]; // Bottom-right
+			map.panInside(map.unproject(p), {padding: padding, animate: false});
+			distanceMoved = map.getPixelBounds().min.subtract(tlPix);
+			expect(distanceMoved.equals(L.point([25, 20]))).to.eql(true);
+		});
+
+		it("supports different padding values for each border", function () {
+			var p = tlPix.add([40, 0]),	// Top-Left
+			    distanceMoved,
+			    opts = {paddingTL: [60, 20], paddingBR: [10, 10]};
+			map.panInside(map.unproject(p), opts);
+			expect(center).to.equal(map.getCenter());
+
+			var br = map.getPixelBounds().max;	// Bottom-Right
+			map.panInside(map.unproject(L.point(br.x - 20, br.y)), opts);
+			expect(center).to.not.equal(map.getCenter);
+		});
+
+		it("pans on both X and Y axes when the target is outside of the view area and both the point's coords are outside the bounds", function () {
+			var p = map.unproject(tlPix.subtract([200, 200]));
+			map.panInside(p, {animate: false});
+			expect(map.getBounds().contains(p)).to.be(true);
+			expect(map.getCenter().lng).to.not.eql(center.lng);
+			expect(map.getCenter().lat).to.not.eql(center.lat);
+		});
+
+		it("pans only on the Y axis when the target's X coord is within bounds but the Y is not", function () {
+			var p = L.latLng(tl.lat + 5, tl.lng);
+			map.panInside(p, {animate: false});
+			expect(map.getBounds().contains(p)).to.be(true);
+			var dx = Math.abs(map.getCenter().lng - center.lng);
+			expect(dx).to.be.lessThan(1.0E-9);
+			expect(map.getCenter().lat).to.not.eql(center.lat);
+		});
+
+		it("pans only on the X axis when the target's Y coord is within bounds but the X is not", function () {
+			var p = L.latLng(tl.lat, tl.lng - 5);
+			map.panInside(p, 0, {animate: false});
+			expect(map.getBounds().contains(p)).to.be(true);
+			expect(map.getCenter().lng).to.not.eql(center.lng);
+			var dy = map.getCenter().lat - center.lat;
+			expect(dy).to.be.lessThan(1.0E-9);
+		});
+	});
+
 
 	describe('#DOM events', function () {
 
